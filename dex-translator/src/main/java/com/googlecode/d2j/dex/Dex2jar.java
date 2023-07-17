@@ -25,6 +25,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Random;
 
+import no.stealthbyte.dex.DexUtils;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.MethodVisitor;
@@ -88,10 +89,9 @@ public final class Dex2jar {
                         }
                         try {
                             if (baos != null) {
-                                baos.write(ByteBuffer.allocate(4).putInt(className.length()).array());
-                                baos.write(className.getBytes(StandardCharsets.UTF_8));
-                                baos.write(ByteBuffer.allocate(4).putInt(data.length).array());
-                                baos.write(data);
+                                DexUtils dexUtils = new DexUtils(baos);
+                                dexUtils.putString(className, false);
+                                dexUtils.putBytes(data, true);
                             }
                             if (dist != null) {
                                 Path dist1 = dist.resolve(className + ".class");

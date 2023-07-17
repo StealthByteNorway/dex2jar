@@ -16,6 +16,7 @@
 
 package com.android.dx.command.dexer;
 
+import no.stealthbyte.dex.DexUtils;
 import com.android.dex.Dex;
 import com.android.dex.DexException;
 import com.android.dex.DexFormat;
@@ -56,6 +57,8 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -170,7 +173,10 @@ public class Main {
     private Arguments args;
 
     /** {@code non-null;} output file in-progress */
-    private DexFile outputDex;
+    public DexFile outputDex;
+
+    /** output bytearray stream */
+    public ByteArrayOutputStream baos;
 
     /**
      * {@code null-ok;} map of resources to include in the output, or
@@ -215,7 +221,7 @@ public class Main {
     private int maxFieldIdsInProcess = 0;
 
     /** true if any files are successfully processed */
-    private volatile boolean anyFilesProcessed;
+    public volatile boolean anyFilesProcessed;
 
     /** class files older than this must be defined in the target dex file. */
     private long minimumFileAge = 0;
@@ -262,6 +268,12 @@ public class Main {
      */
     public static int run(Arguments arguments) throws IOException {
         return new Main(new DxContext()).runDx(arguments);
+    }
+
+    public static int run() throws IOException {
+        DxContext context = new DxContext();
+        Arguments arguments = new Arguments(context);
+        return new Main(context).runDx(arguments);
     }
 
     public int runDx(Arguments arguments) throws IOException {
@@ -332,7 +344,17 @@ public class Main {
 
         outArray = mergeLibraryDexBuffers(outArray);
 
-        if (args.jarOutput) {
+        if (args.baosOutput) {
+            // Effectively free up the (often massive) DexFile memory.
+            outputDex = null;
+
+            if (outArray == null) {
+                throw new NullPointerException("outArray is null!");
+            }
+
+            baos.write(new byte[] { 1 }); // Type
+            baos.write(outArray);
+        } else if (args.jarOutput) {
             // Effectively free up the (often massive) DexFile memory.
             outputDex = null;
 
@@ -396,7 +418,24 @@ public class Main {
             throw new RuntimeException("Unexpected exception in dex writer thread");
         }
 
-        if (args.jarOutput) {
+        if (args.baosOutput) {
+            // Effectively free up the (often massive) DexFile memory.
+            outputDex = null;
+
+            DexUtils dexOut = new DexUtils(baos);
+            dexOut.putByte((byte)2, false); // Type
+
+            dexOut.putInt(dexOutputArrays.size(), false);
+            for (int i = 0; i < dexOutputArrays.size(); i++) {
+                String name = getDexFileName(i);
+                dexOut.putString(name, false);
+
+                byte[] bytes = dexOutputArrays.get(i);
+                dexOut.putBytes(bytes, false);
+            }
+            dexOut.updateBytes();
+
+        } else if (args.jarOutput) {
             for (int i = 0; i < dexOutputArrays.size(); i++) {
                 outputResources.put(getDexFileName(i),
                         dexOutputArrays.get(i));
@@ -513,13 +552,19 @@ public class Main {
     private boolean processAllFiles() {
         createDexFile();
 
-        if (args.jarOutput) {
+        if (args.baosOutput) {
+            baos = new ByteArrayOutputStream();
+        } else if (args.jarOutput) {
             outputResources = new TreeMap<String, byte[]>();
         }
 
         anyFilesProcessed = false;
-        String[] fileNames = args.fileNames;
-        Arrays.sort(fileNames);
+        String[] fileNames = null;
+
+        if (!args.baosOutput) {
+            fileNames = args.fileNames;
+            Arrays.sort(fileNames);
+        }
 
         // translate classes in parallel
         classTranslatorPool = new ThreadPoolExecutor(args.numThreads,
@@ -529,9 +574,20 @@ public class Main {
         // collect translated and write to dex in order
         classDefItemConsumer = Executors.newSingleThreadExecutor();
 
-
         try {
-            if (args.mainDexListFile != null) {
+            if (args.baosOutput) {
+                DexUtils dexUtils = new DexUtils(args.baosBytes);
+                while (dexUtils.hasData()) {
+                    String name = dexUtils.readString();
+                    byte[] bytes = dexUtils.readBytes();
+                    if (processClass(name, bytes))
+                        updateStatus(true);
+                }
+            } else if (args.mainDexListFile != null) {
+                if (fileNames == null) {
+                    throw new NullPointerException("fileNames is null!");
+                }
+
                 // with --main-dex-list
                 FileNameFilter mainPassFilter = args.strictNameCheck ? new MainDexListFilter() :
                     new BestEffortMainDexListFilter();
@@ -580,6 +636,8 @@ public class Main {
              * Ignore it and just let the error reporting do
              * their things.
              */
+        } catch (IOException e) {
+            e.printStackTrace();
         }
 
         try {
@@ -1308,6 +1366,22 @@ public class Main {
         public boolean jarOutput = false;
 
         /**
+         * whether the output should be written to a
+         * ByteArrayOutputStream instead of a .jar or .dex
+         */
+        public boolean baosOutput = false;
+
+        /**
+         * if baos, then this will be the class data, in this format:
+         * loop:
+         * - name len
+         * - name bytes
+         * - data len
+         * - data bytes
+         */
+        public byte[] baosBytes = null;
+
+        /**
          * when writing a {@code .jar} file, whether to still
          * keep the {@code .class} files
          */
@@ -1525,7 +1599,9 @@ public class Main {
                     keepClassesInJar = true;
                 } else if (parser.isArg("--output=")) {
                     outName = parser.getLastValue();
-                    if (new File(outName).isDirectory()) {
+                    if (outName.equals("baos")) {
+                        baosOutput = true;
+                    } else if (new File(outName).isDirectory()) {
                         jarOutput = false;
                         outputIsDirectory = true;
                     } else if (FileUtils.hasArchiveSuffix(outName)) {
