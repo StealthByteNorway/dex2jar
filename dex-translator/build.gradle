@@ -8,6 +8,7 @@ dependencies {
     api project(':dex-reader-api')
     api project(':dex-reader')
     api project(':dex-ir')
+    api project(':dx')
     api project(':d2j-base-cmd')
     api(group: 'com.android.tools', name: 'r8', version: project.property('r8Version'))
     api fileTree(dir: '../libs', include: '*.jar')
